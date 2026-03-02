@@ -2,7 +2,8 @@ from flask import Flask, request, jsonify, render_template
 import os
 import json
 import requests
-from config import MODEL_CONFIG, APP_CONFIG
+from openai import OpenAI
+from config import MODEL_CONFIG, DEEPSEEK_CONFIG, DEFAULT_MODEL, APP_CONFIG
 
 app = Flask(__name__)
 
@@ -10,41 +11,79 @@ app = Flask(__name__)
 conversations = {}
 conversation_counter = 1
 
-# 调用本地Ollama模型
-def get_model_response(prompt, history=[]):
+# 调用模型（支持流式输出）
+def get_model_response(prompt, history=[], stream=False):
     try:
-        # 构建Ollama API请求
-        url = MODEL_CONFIG["api_url"]
-        
-        # 构建消息历史
-        messages = []
-        for msg in history:
+        if DEFAULT_MODEL == "deepseek":
+            # 调用DeepSeek模型
+            client = OpenAI(
+                api_key=DEEPSEEK_CONFIG["api_key"],
+                base_url=DEEPSEEK_CONFIG["api_url"]
+            )
+            
+            # 构建消息历史
+            messages = []
+            # 添加系统消息
             messages.append({
-                "role": msg["role"],
-                "content": msg["content"]
+                "role": "system",
+                "content": "你是一个聪明、严谨的 AI 助手。请在给出最终答案前，先进行充分的逻辑推导。"
             })
-        
-        # 添加当前用户消息
-        messages.append({
-            "role": "user",
-            "content": prompt
-        })
-        
-        # 发送请求到Ollama
-        response = requests.post(url, json={
-            "model": MODEL_CONFIG["model_name"],  # 使用配置文件中指定的模型
-            "messages": messages,
-            "stream": MODEL_CONFIG["stream"]
-        })
-        
-        # 解析响应
-        if response.status_code == 200:
-            data = response.json()
-            return data["message"]["content"]
+            # 添加历史消息
+            for msg in history:
+                messages.append({
+                    "role": msg["role"],
+                    "content": msg["content"]
+                })
+            
+            # 添加当前用户消息
+            messages.append({
+                "role": "user",
+                "content": prompt
+            })
+            
+            # 发送请求到DeepSeek
+            response = client.chat.completions.create(
+                model=DEEPSEEK_CONFIG["model_name"],
+                messages=messages,
+                temperature=0.6,
+                max_tokens=4096,
+                stream=stream,
+                extra_body=DEEPSEEK_CONFIG["extra_body"]
+            )
+            
+            return response
         else:
-            return f"错误：{response.status_code} - {response.text}"
+            # 调用本地Ollama模型
+            # 构建Ollama API请求
+            url = MODEL_CONFIG["api_url"]
+            
+            # 构建消息历史
+            messages = []
+            for msg in history:
+                messages.append({
+                    "role": msg["role"],
+                    "content": msg["content"]
+                })
+            
+            # 添加当前用户消息
+            messages.append({
+                "role": "user",
+                "content": prompt
+            })
+            
+            # 发送请求到Ollama
+            response = requests.post(url, json={
+                "model": MODEL_CONFIG["model_name"],  # 使用配置文件中指定的模型
+                "messages": messages,
+                "stream": stream
+            }, stream=stream)
+            
+            return response
     except Exception as e:
-        return f"连接Ollama模型失败：{str(e)}"
+        if DEFAULT_MODEL == "deepseek":
+            return f"连接DeepSeek模型失败：{str(e)}"
+        else:
+            return f"连接本地模型失败：{str(e)}"
 
 @app.route('/')
 def index():
@@ -55,6 +94,7 @@ def chat():
     data = request.json
     conversation_id = data.get('conversation_id')
     message = data.get('message')
+    stream = data.get('stream', True)  # 默认使用流式输出
     
     if not conversation_id:
         # 新对话
@@ -67,16 +107,75 @@ def chat():
     conversations[conversation_id].append({'role': 'user', 'content': message})
     
     # 获取模型响应
-    response = get_model_response(message, conversations[conversation_id])
+    response = get_model_response(message, conversations[conversation_id], stream)
     
-    # 添加模型响应到对话历史
-    conversations[conversation_id].append({'role': 'assistant', 'content': response})
+    # 检查是否为错误响应
+    if isinstance(response, str) and response.startswith("连接"):
+        # 添加错误响应到对话历史
+        conversations[conversation_id].append({'role': 'assistant', 'content': response})
+        return jsonify({
+            'conversation_id': conversation_id,
+            'response': response,
+            'history': conversations[conversation_id]
+        })
     
-    return jsonify({
-        'conversation_id': conversation_id,
-        'response': response,
-        'history': conversations[conversation_id]
-    })
+    # 处理流式响应
+    if stream:
+        if DEFAULT_MODEL == "deepseek":
+            # 处理DeepSeek流式响应
+            def generate():
+                full_response = ""
+                for chunk in response:
+                    if hasattr(chunk, 'choices') and chunk.choices:
+                        delta = chunk.choices[0].delta
+                        if hasattr(delta, 'content') and delta.content:
+                            content = delta.content
+                            full_response += content
+                            yield f"data: {json.dumps({'chunk': content, 'conversation_id': conversation_id})}\n\n"
+                # 添加完整响应到对话历史
+                conversations[conversation_id].append({'role': 'assistant', 'content': full_response})
+                yield f"data: {json.dumps({'complete': True, 'conversation_id': conversation_id})}\n\n"
+            return app.response_class(generate(), mimetype='text/event-stream')
+        else:
+            # 处理本地Ollama模型流式响应
+            def generate():
+                full_response = ""
+                for line in response.iter_lines():
+                    if line:
+                        try:
+                            data = json.loads(line.decode('utf-8'))
+                            if 'message' in data and 'content' in data['message']:
+                                content = data['message']['content']
+                                if content:
+                                    full_response += content
+                                    yield f"data: {json.dumps({'chunk': content, 'conversation_id': conversation_id})}\n\n"
+                        except json.JSONDecodeError:
+                            pass
+                # 添加完整响应到对话历史
+                conversations[conversation_id].append({'role': 'assistant', 'content': full_response})
+                yield f"data: {json.dumps({'complete': True, 'conversation_id': conversation_id})}\n\n"
+            return app.response_class(generate(), mimetype='text/event-stream')
+    else:
+        # 处理非流式响应
+        if DEFAULT_MODEL == "deepseek":
+            # 处理DeepSeek非流式响应
+            full_response = response.choices[0].message.content if response.choices else "模型未返回有效响应"
+        else:
+            # 处理本地Ollama模型非流式响应
+            if response.status_code == 200:
+                data = response.json()
+                full_response = data["message"]["content"]
+            else:
+                full_response = f"错误：{response.status_code} - {response.text}"
+        
+        # 添加完整响应到对话历史
+        conversations[conversation_id].append({'role': 'assistant', 'content': full_response})
+        
+        return jsonify({
+            'conversation_id': conversation_id,
+            'response': full_response,
+            'history': conversations[conversation_id]
+        })
 
 @app.route('/api/conversations', methods=['GET'])
 def get_conversations():

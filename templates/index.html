@@ -582,7 +582,19 @@
                         const data = await response.json();
                         
                         currentConversationId.value = conversationId;
-                        messages.value = data.history || [];
+                        
+                        // 对历史消息进行markdown渲染
+                        const renderedMessages = (data.history || []).map(msg => {
+                            if (msg.role === 'assistant') {
+                                return {
+                                    ...msg,
+                                    content: marked.parse(msg.content)
+                                };
+                            }
+                            return msg;
+                        });
+                        
+                        messages.value = renderedMessages;
                         
                         // 滚动到底部
                         setTimeout(scrollToBottom, 100);
@@ -643,6 +655,7 @@
                     isLoading.value = true;
                     
                     try {
+                        // 使用流式请求
                         const response = await fetch('/api/chat', {
                             method: 'POST',
                             headers: {
@@ -650,56 +663,92 @@
                             },
                             body: JSON.stringify({
                                 conversation_id: currentConversationId.value,
-                                message: message
+                                message: message,
+                                stream: true
                             })
                         });
                         
-                        const data = await response.json();
-                        
-                        // 更新当前对话ID
-                        currentConversationId.value = data.conversation_id;
+                        if (!response.ok) {
+                            throw new Error('请求失败');
+                        }
                         
                         // 移除loading状态
                         isLoading.value = false;
                         
-                        // 显示模型响应（支持Markdown）
-                        const content = data.response;
-                        const renderedContent = marked.parse(content);
-                        
-                        // 添加一个临时消息用于打字机效果
+                        // 添加一个临时消息用于流式输出
                         const tempMessageId = Date.now();
                         messages.value.push({ role: 'assistant', content: '', tempId: tempMessageId });
                         
-                        // 打字机效果
-                        let index = 0;
-                        const typingSpeed = 30; // 打字速度（毫秒/字符）
+                        // 处理流式响应
+                        const reader = response.body.getReader();
+                        const decoder = new TextDecoder();
+                        let fullContent = '';
                         
-                        function type() {
-                            if (index < content.length) {
-                                // 逐字添加文本
-                                const currentText = content.substring(0, index + 1);
-                                // 渲染Markdown
-                                const currentRendered = marked.parse(currentText);
-                                
-                                // 更新临时消息
-                                const tempMessage = messages.value.find(msg => msg.tempId === tempMessageId);
-                                if (tempMessage) {
-                                    tempMessage.content = currentRendered;
+                        while (true) {
+                            const { done, value } = await reader.read();
+                            if (done) {
+                                break;
+                            }
+                            
+                            const chunk = decoder.decode(value, { stream: true });
+                            const lines = chunk.split('\n\n');
+                            
+                            for (const line of lines) {
+                                if (line.startsWith('data: ')) {
+                                    const dataStr = line.substring(6);
+                                    if (dataStr === '[DONE]') {
+                                        break;
+                                    }
+                                    try {
+                                        const data = JSON.parse(dataStr);
+                                        if (data.chunk) {
+                                            fullContent += data.chunk;
+                                            
+                                            // 更新当前对话ID
+                                            if (data.conversation_id) {
+                                                currentConversationId.value = data.conversation_id;
+                                            }
+                                            
+                                            // 实时渲染Markdown
+                                            try {
+                                                const currentRendered = marked.parse(fullContent);
+                                                const tempMessage = messages.value.find(msg => msg.tempId === tempMessageId);
+                                                if (tempMessage) {
+                                                    tempMessage.content = currentRendered;
+                                                }
+                                            } catch (error) {
+                                                // 如果Markdown解析出错，显示纯文本
+                                                const tempMessage = messages.value.find(msg => msg.tempId === tempMessageId);
+                                                if (tempMessage) {
+                                                    tempMessage.content = fullContent;
+                                                }
+                                            }
+                                            
+                                            scrollToBottom();
+                                        } else if (data.complete) {
+                                            // 流式输出完成
+                                            const tempMessage = messages.value.find(msg => msg.tempId === tempMessageId);
+                                            if (tempMessage) {
+                                                // 确保最终渲染正确
+                                                try {
+                                                    const finalRendered = marked.parse(fullContent);
+                                                    tempMessage.content = finalRendered;
+                                                } catch (error) {
+                                                    tempMessage.content = fullContent;
+                                                }
+                                                delete tempMessage.tempId; // 移除临时ID
+                                            }
+                                            
+                                            // 重新加载对话列表
+                                            await loadConversations();
+                                            scrollToBottom();
+                                        }
+                                    } catch (error) {
+                                        console.error('解析流式响应失败:', error);
+                                    }
                                 }
-                                
-                                index++;
-                                scrollToBottom();
-                                setTimeout(type, typingSpeed);
                             }
                         }
-                        
-                        type();
-                        
-                        // 重新加载对话列表
-                        await loadConversations();
-                        
-                        // 滚动到底部
-                        setTimeout(scrollToBottom, 100);
                         
                     } catch (error) {
                         console.error('发送消息失败:', error);
@@ -716,15 +765,31 @@
                     textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px';
                 };
                 
+                // 记录用户是否手动滚动
+                let userScrolled = false;
+                
                 const scrollToBottom = () => {
-                    if (chatMessages.value) {
+                    if (chatMessages.value && !userScrolled) {
                         chatMessages.value.scrollTop = chatMessages.value.scrollHeight;
+                    }
+                };
+                
+                // 监听滚动事件，检测用户是否手动滚动
+                const setupScrollListener = () => {
+                    if (chatMessages.value) {
+                        chatMessages.value.addEventListener('scroll', () => {
+                            // 检查用户是否滚动到了接近底部的位置
+                            const { scrollTop, scrollHeight, clientHeight } = chatMessages.value;
+                            // 如果用户滚动的位置离底部超过100px，则认为用户在手动滚动
+                            userScrolled = scrollHeight - scrollTop - clientHeight > 100;
+                        });
                     }
                 };
                 
                 // 生命周期
                 onMounted(() => {
                     loadConversations();
+                    setupScrollListener();
                 });
                 
                 // 监听消息变化，自动滚动到底部
