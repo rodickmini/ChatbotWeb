@@ -110,13 +110,14 @@ def chat():
     response = get_model_response(message, conversations[conversation_id], stream)
     
     # 检查是否为错误响应
-    if isinstance(response, str) and response.startswith("连接"):
+    if isinstance(response, str) and (response.startswith("连接") or "失败" in response):
         # 添加错误响应到对话历史
         conversations[conversation_id].append({'role': 'assistant', 'content': response})
         return jsonify({
             'conversation_id': conversation_id,
             'response': response,
-            'history': conversations[conversation_id]
+            'history': conversations[conversation_id],
+            'error': True
         })
     
     # 处理流式响应

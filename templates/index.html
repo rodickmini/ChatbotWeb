@@ -668,12 +668,26 @@
                             })
                         });
                         
-                        if (!response.ok) {
-                            throw new Error('请求失败');
-                        }
-                        
                         // 移除loading状态
                         isLoading.value = false;
+                        
+                        // 检查是否为JSON响应（错误情况）
+                        const contentType = response.headers.get('content-type');
+                        if (contentType && contentType.includes('application/json')) {
+                            try {
+                                const errorData = await response.json();
+                                if (errorData.error) {
+                                    throw new Error(errorData.response || '模型访问失败');
+                                }
+                            } catch (e) {
+                                // 不是错误响应，继续处理流式数据
+                            }
+                        }
+                        
+                        // 检查响应体是否存在且可读取
+                        if (!response.body) {
+                            throw new Error('响应体为空');
+                        }
                         
                         // 添加一个临时消息用于流式输出
                         const tempMessageId = Date.now();
@@ -754,7 +768,9 @@
                         console.error('发送消息失败:', error);
                         // 移除loading状态
                         isLoading.value = false;
-                        messages.value.push({ role: 'assistant', content: '发送消息失败，请重试' });
+                        // 显示具体的错误信息
+                        const errorMessage = error.message || '发送消息失败，请重试';
+                        messages.value.push({ role: 'assistant', content: errorMessage });
                         scrollToBottom();
                     }
                 };
@@ -778,10 +794,14 @@
                 const setupScrollListener = () => {
                     if (chatMessages.value) {
                         chatMessages.value.addEventListener('scroll', () => {
-                            // 检查用户是否滚动到了接近底部的位置
+                            // 只要用户有滚动行为，就认为用户在手动滚动
+                            userScrolled = true;
+                            
+                            // 当用户滚动到底部附近时，重新启用自动滚动
                             const { scrollTop, scrollHeight, clientHeight } = chatMessages.value;
-                            // 如果用户滚动的位置离底部超过100px，则认为用户在手动滚动
-                            userScrolled = scrollHeight - scrollTop - clientHeight > 100;
+                            if (scrollHeight - scrollTop - clientHeight < 50) {
+                                userScrolled = false;
+                            }
                         });
                     }
                 };
