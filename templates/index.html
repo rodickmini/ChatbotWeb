@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>本地大模型聊天</title>
+    <title>NARI.AIM.BOT聊天</title>
     <style>
         * {
             margin: 0;
@@ -169,12 +169,50 @@
             border-bottom: 1px solid var(--border-color);
             background-color: var(--sidebar-bg);
             box-shadow: var(--shadow-sm);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
         }
         
         .chat-header h2 {
             font-size: 18px;
             font-weight: 600;
             color: var(--text-primary);
+            margin: 0;
+        }
+        
+        .model-selector {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .model-selector label {
+            font-size: 14px;
+            color: var(--text-secondary);
+            font-weight: 500;
+        }
+        
+        .model-selector select {
+            padding: 6px 12px;
+            border: 1px solid var(--border-color);
+            border-radius: var(--border-radius);
+            font-size: 14px;
+            background-color: white;
+            color: var(--text-primary);
+            cursor: pointer;
+            transition: var(--transition);
+        }
+        
+        .model-selector select:hover {
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px rgba(0, 112, 243, 0.1);
+        }
+        
+        .model-selector select:focus {
+            outline: none;
+            border-color: var(--primary-color);
+            box-shadow: 0 0 0 3px rgba(0, 112, 243, 0.1);
         }
         
         .chat-messages {
@@ -474,7 +512,7 @@
         <!-- 左侧对话列表 -->
         <div class="sidebar">
             <div class="sidebar-header">
-                <h1>本地大模型</h1>
+                <h1>NARI.AIM.BOT</h1>
                 <button class="new-chat-btn" v-on:click="newChat">新对话</button>
             </div>
             <div class="conversation-list">
@@ -496,6 +534,13 @@
         <div class="chat-window">
             <div class="chat-header">
                 <h2 v-text="currentConversationTitle"></h2>
+                <div class="model-selector">
+                    <label for="model-select">选择模型：</label>
+                    <select id="model-select" v-model="selectedModel">
+                        <option value="deepseek">Deepseek-V3.2</option>
+                        <option value="qwen">Qwen3-VL-32B</option>
+                    </select>
+                </div>
             </div>
             <div class="chat-messages" ref="chatMessages">
                 <div v-if="messages.length === 0" class="empty-state">
@@ -509,7 +554,7 @@
                     v-bind:class="msg.role"
                 >
                     <div class="message-avatar" v-text="msg.role === 'user' ? '你' : 'AI'"></div>
-                    <div class="message-content" v-html="msg.content"></div>
+                    <div class="message-content" v-bind:class="{ 'markdown-body': msg.role === 'assistant' }" v-html="msg.content"></div>
                 </div>
                 <div v-if="isLoading" class="message assistant">
                     <div class="message-avatar">AI</div>
@@ -541,9 +586,74 @@
     </div>
     
     <script src="/static/js/vue.global.js"></script>
-    <script src="/static/js/marked.min.js"></script>
+    <script src="/static/js/markdown-it/markdown-it.min.js"></script>
+    <script src="/static/js/highlight.js/highlight.min.js"></script>
+    <link rel="stylesheet" href="/static/css/github-markdown.min.css">
+    <link rel="stylesheet" href="/static/css/github.min.css">
     <script>
         const { createApp, ref, computed, onMounted, watch } = Vue;
+        
+        // 初始化markdown-it实例，配置代码高亮
+        const md = window.markdownit({
+            html: true,
+            linkify: true,
+            typographer: true,
+            breaks: true, // 自动将换行符转换为<br>
+            highlight: function (str, lang) {
+                if (lang && window.hljs && window.hljs.getLanguage(lang)) {
+                    try {
+                        return window.hljs.highlight(str, { language: lang }).value;
+                    } catch (__) {
+                        // 高亮失败时返回原始代码
+                        return str;
+                    }
+                }
+                return str; // 使用默认处理
+            }
+        });
+        
+        // 安全的Markdown渲染函数
+        function safeRenderMarkdown(content) {
+            try {
+                return md.render(content);
+            } catch (error) {
+                console.error('Markdown渲染错误:', error);
+                // 渲染失败时，尝试处理特殊情况
+                try {
+                    // 处理不完整的代码块
+                    if (content.includes('```')) {
+                        const parts = content.split('```');
+                        let result = '';
+                        for (let i = 0; i < parts.length; i++) {
+                            if (i % 2 === 0) {
+                                // 普通文本
+                                result += md.render(parts[i]);
+                            } else {
+                                // 代码块部分
+                                const codeParts = parts[i].split('\n');
+                                const lang = codeParts[0] || '';
+                                const code = codeParts.slice(1).join('\n');
+                                if (lang && window.hljs && window.hljs.getLanguage(lang)) {
+                                    try {
+                                        result += `<pre><code class="language-${lang}">${window.hljs.highlight(code, { language: lang }).value}</code></pre>`;
+                                    } catch (e) {
+                                        result += `<pre><code>${code}</code></pre>`;
+                                    }
+                                } else {
+                                    result += `<pre><code>${code}</code></pre>`;
+                                }
+                            }
+                        }
+                        return result;
+                    }
+                    // 其他情况，尝试简单渲染
+                    return md.renderInline(content);
+                } catch (e) {
+                    // 所有渲染都失败时，返回转义后的文本
+                    return content.replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                }
+            }
+        }
         
         createApp({
             setup() {
@@ -555,6 +665,8 @@
                 const isLoading = ref(false);
                 const chatMessages = ref(null);
                 const messageInput = ref(null);
+                // 从localStorage读取模型选择，默认选择deepseek
+                const selectedModel = ref(localStorage.getItem('selectedModel') || 'deepseek');
                 
                 // 计算属性
                 const currentConversationTitle = computed(() => {
@@ -570,6 +682,7 @@
                     try {
                         const response = await fetch('/api/conversations');
                         const data = await response.json();
+                        // 后端已经按最后更新时间排序，直接使用
                         conversations.value = data;
                     } catch (error) {
                         console.error('加载对话列表失败:', error);
@@ -588,7 +701,13 @@
                             if (msg.role === 'assistant') {
                                 return {
                                     ...msg,
-                                    content: marked.parse(msg.content)
+                                    content: safeRenderMarkdown(msg.content)
+                                };
+                            } else if (msg.role === 'user') {
+                                // 对用户消息保留换行格式
+                                return {
+                                    ...msg,
+                                    content: msg.content.replace(/\n/g, '<br>')
                                 };
                             }
                             return msg;
@@ -647,12 +766,29 @@
                         messageInput.value.style.height = 'auto';
                     }
                     
-                    // 临时显示用户消息
-                    messages.value.push({ role: 'user', content: message });
-                    scrollToBottom();
+                    // 临时显示用户消息，保留换行格式
+                    const formattedMessage = message.replace(/\n/g, '<br>');
+                    messages.value.push({ role: 'user', content: formattedMessage });
+                    // 发送新消息时强制滚动到底部
+                    scrollToBottom(true);
                     
                     // 显示loading状态
                     isLoading.value = true;
+                    
+                    // 如果是新对话，先在左侧添加一个临时对话项
+                    let tempConversationId = null;
+                    if (!currentConversationId.value) {
+                        tempConversationId = 'temp_' + Date.now();
+                        // 临时添加到对话列表
+                        conversations.value.unshift({
+                            id: tempConversationId,
+                            title: '新对话',
+                            message_count: 1,
+                            last_updated: Date.now()
+                        });
+                        // 设置为当前对话
+                        currentConversationId.value = tempConversationId;
+                    }
                     
                     try {
                         // 使用流式请求
@@ -662,9 +798,10 @@
                                 'Content-Type': 'application/json'
                             },
                             body: JSON.stringify({
-                                conversation_id: currentConversationId.value,
+                                conversation_id: currentConversationId.value === tempConversationId ? null : currentConversationId.value,
                                 message: message,
-                                stream: true
+                                stream: true,
+                                model: selectedModel.value
                             })
                         });
                         
@@ -697,6 +834,7 @@
                         const reader = response.body.getReader();
                         const decoder = new TextDecoder();
                         let fullContent = '';
+                        let receivedConversationId = false;
                         
                         while (true) {
                             const { done, value } = await reader.read();
@@ -719,41 +857,44 @@
                                             fullContent += data.chunk;
                                             
                                             // 更新当前对话ID
-                                            if (data.conversation_id) {
+                                            if (data.conversation_id && !receivedConversationId) {
+                                                receivedConversationId = true;
                                                 currentConversationId.value = data.conversation_id;
+                                                
+                                                // 如果有临时对话ID，更新对话列表
+                                                if (tempConversationId) {
+                                                    // 移除临时对话
+                                                    conversations.value = conversations.value.filter(conv => conv.id !== tempConversationId);
+                                                    // 添加新对话到列表顶部
+                                                    conversations.value.unshift({
+                                                        id: data.conversation_id,
+                                                        title: '新对话',
+                                                        message_count: 2,
+                                                        last_updated: Date.now()
+                                                    });
+                                                }
                                             }
                                             
                                             // 实时渲染Markdown
-                                            try {
-                                                const currentRendered = marked.parse(fullContent);
-                                                const tempMessage = messages.value.find(msg => msg.tempId === tempMessageId);
-                                                if (tempMessage) {
-                                                    tempMessage.content = currentRendered;
-                                                }
-                                            } catch (error) {
-                                                // 如果Markdown解析出错，显示纯文本
-                                                const tempMessage = messages.value.find(msg => msg.tempId === tempMessageId);
-                                                if (tempMessage) {
-                                                    tempMessage.content = fullContent;
-                                                }
+                                            const currentRendered = safeRenderMarkdown(fullContent);
+                                            const tempMessage = messages.value.find(msg => msg.tempId === tempMessageId);
+                                            if (tempMessage) {
+                                                tempMessage.content = currentRendered;
                                             }
                                             
+                                            // 流式输出时保持自动滚动
                                             scrollToBottom();
                                         } else if (data.complete) {
                                             // 流式输出完成
                                             const tempMessage = messages.value.find(msg => msg.tempId === tempMessageId);
                                             if (tempMessage) {
                                                 // 确保最终渲染正确
-                                                try {
-                                                    const finalRendered = marked.parse(fullContent);
-                                                    tempMessage.content = finalRendered;
-                                                } catch (error) {
-                                                    tempMessage.content = fullContent;
-                                                }
+                                                const finalRendered = safeRenderMarkdown(fullContent);
+                                                tempMessage.content = finalRendered;
                                                 delete tempMessage.tempId; // 移除临时ID
                                             }
                                             
-                                            // 重新加载对话列表
+                                            // 重新加载对话列表，获取更新后的标题
                                             await loadConversations();
                                             scrollToBottom();
                                         }
@@ -771,6 +912,15 @@
                         // 显示具体的错误信息
                         const errorMessage = error.message || '发送消息失败，请重试';
                         messages.value.push({ role: 'assistant', content: errorMessage });
+                        
+                        // 如果有临时对话ID，更新对话列表
+                        if (tempConversationId) {
+                            // 移除临时对话
+                            conversations.value = conversations.value.filter(conv => conv.id !== tempConversationId);
+                            // 重新加载对话列表
+                            loadConversations();
+                        }
+                        
                         scrollToBottom();
                     }
                 };
@@ -784,8 +934,9 @@
                 // 记录用户是否手动滚动
                 let userScrolled = false;
                 
-                const scrollToBottom = () => {
-                    if (chatMessages.value && !userScrolled) {
+                const scrollToBottom = (force = false) => {
+                    if (chatMessages.value && (!userScrolled || force)) {
+                        // 强制滚动或用户没有手动滚动时，自动滚动到底部
                         chatMessages.value.scrollTop = chatMessages.value.scrollHeight;
                     }
                 };
@@ -793,15 +944,24 @@
                 // 监听滚动事件，检测用户是否手动滚动
                 const setupScrollListener = () => {
                     if (chatMessages.value) {
+                        // 记录上次滚动位置，用于判断是否是用户手动滚动
+                        let lastScrollTop = 0;
+                        
                         chatMessages.value.addEventListener('scroll', () => {
-                            // 只要用户有滚动行为，就认为用户在手动滚动
-                            userScrolled = true;
-                            
-                            // 当用户滚动到底部附近时，重新启用自动滚动
                             const { scrollTop, scrollHeight, clientHeight } = chatMessages.value;
-                            if (scrollHeight - scrollTop - clientHeight < 50) {
+                            const isAtBottom = scrollHeight - scrollTop - clientHeight < 10;
+                            
+                            // 只有当滚动位置减少（用户向上滚动）时，才认为用户在手动滚动
+                            if (scrollTop < lastScrollTop || !isAtBottom) {
+                                // 用户向上滚动或不在底部，停止自动滚动
+                                userScrolled = true;
+                            } else if (isAtBottom) {
+                                // 用户滚动到底部，恢复自动滚动
                                 userScrolled = false;
                             }
+                            
+                            // 更新上次滚动位置
+                            lastScrollTop = scrollTop;
                         });
                     }
                 };
@@ -817,6 +977,16 @@
                     setTimeout(scrollToBottom, 100);
                 }, { deep: true });
                 
+                // 监听聊天标题变化，更新页面标题
+                watch(currentConversationTitle, (newTitle) => {
+                    document.title = `${newTitle} - NARI.AIM.BOT`;
+                });
+                
+                // 监听模型选择变化，保存到localStorage
+                watch(selectedModel, (newModel) => {
+                    localStorage.setItem('selectedModel', newModel);
+                });
+                
                 return {
                     conversations,
                     currentConversationId,
@@ -826,6 +996,7 @@
                     isLoading,
                     chatMessages,
                     messageInput,
+                    selectedModel,
                     loadConversations,
                     loadConversation,
                     newChat,
